@@ -1,0 +1,10 @@
+{
+  "uuid": "dock-tray@alessandrot",
+  "name": "Dock Tray",
+  "description": "Moves AppIndicator / KStatusNotifierItem tray icons from the top bar into Dash to Dock. Requires the AppIndicator and Dash to Dock extensions.",
+  "shell-version": [
+    "50"
+  ],
+  "version": 1,
+  "url": "https://github.com/AlessandroTelesca/dock-tray"
+}
