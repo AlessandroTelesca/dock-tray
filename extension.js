@@ -3,6 +3,7 @@
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
 
@@ -28,6 +29,9 @@ export default class DockTrayExtension extends Extension {
         this._origins = new Map(); // container -> {parent, index}
         this._layouts = new Map(); // button -> its own layout, restored when it goes back to the panel
         this._menuIds = new Map(); // indicator -> handler id
+        this._slots = []; // {dash, box} per dock
+        this._watchedParents = new Set(); // panel boxes icons came from
+        this._host = null; // the slot holding the real icons
 
         this._panelBoxes = [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox];
         this._panelBoxIds = this._panelBoxes.map(box =>
@@ -51,9 +55,13 @@ export default class DockTrayExtension extends Extension {
             global.compositor.get_laters().remove(this._laterId);
             this._laterId = 0;
         }
+        if (this._moveLaterId) {
+            global.compositor.get_laters().remove(this._moveLaterId);
+            this._moveLaterId = 0;
+        }
 
         this._unbindDockManager();
-        this._origins = this._menuIds = this._layouts = null;
+        this._origins = this._menuIds = this._layouts = this._slots = this._watchedParents = null;
     }
 
     // --- Dash to Dock lifecycle --------------------------------------------
@@ -99,18 +107,25 @@ export default class DockTrayExtension extends Extension {
         this._detachFromDock();
     }
 
+    // Every dock gets a tray. The real icons live in one of them, the host; the others show clones of them, and the
+    // real icons move into a dock's tray as the pointer enters it.
     _attachToDock() {
         this._detachFromDock();
 
-        const dock = this._dockManager?.mainDock;
-        const dash = dock?.dash;
-        const container = dash?._dashContainer;
-        if (!container)
-            return;
+        const docks = this._dockManager?.constructor.allDocks ?? [];
+        for (const dock of docks) {
+            const dash = dock?.dash;
+            const container = dash?._dashContainer;
+            if (container)
+                this._addSlot(dash, container);
+        }
+        this._host = this._slots[0] ?? null;
+        this._sync();
+    }
 
+    _addSlot(dash, container) {
         const horizontal = dash._isHorizontal;
-        this._dash = dash;
-        this._trayBox = new St.BoxLayout({
+        const box = new St.BoxLayout({
             style_class: `dock-tray ${horizontal ? 'horizontal' : 'vertical'}`,
             orientation: horizontal ? Clutter.Orientation.HORIZONTAL : Clutter.Orientation.VERTICAL,
             // Across the dock it spans the dock's thickness, so the buttons can too.
@@ -118,33 +133,162 @@ export default class DockTrayExtension extends Extension {
             y_align: horizontal ? Clutter.ActorAlign.FILL : Clutter.ActorAlign.CENTER,
             x_expand: !horizontal,
             y_expand: horizontal,
+            reactive: true,
+            track_hover: true,
         });
-        dash.connectObject('icon-size-changed', () => this._sizeButtons(), this);
-        // The dock is being torn down (dash-to-dock rebuilds docks on settings and
-        // monitor changes). User handlers run before Clutter destroys the children,
-        // so hand the icons back to the panel before they die with the dock.
-        this._trayBox.connect('destroy', () => {
-            // The dock is going away with the box: nothing to tell it.
-            this._menuAnnounced = false;
-            if (this._trayBox)
-                this._restoreAll();
-            this._trayBox = null;
-            this._dash = null;
+        const slot = {dash, box};
+        this._slots.push(slot);
+
+        dash.connectObject('icon-size-changed', () => {
+            if (slot === this._host)
+                this._sizeButtons();
+        }, this);
+        // Not from inside the crossing event: Clutter is still picking the actors being moved and destroyed.
+        box.connect('notify::hover', () => {
+            if (box.hover && slot !== this._host)
+                this._queueMove();
+        });
+        // The dock is being torn down (dash-to-dock rebuilds docks on settings and monitor changes). User handlers
+        // run before Clutter destroys the children, so the icons go back to the panel before they die with the dock.
+        box.connect('destroy', () => {
+            if (!this._slots?.includes(slot))
+                return;
+            dash.disconnectObject(this);
+            this._slots.splice(this._slots.indexOf(slot), 1);
+            if (slot !== this._host)
+                return;
+            if (this._announcedDash === dash) {
+                // The dock is going away: nothing to tell it.
+                this._menuAnnounced = false;
+                this._announcedDash = null;
+            }
+            // Dash to Dock tears all docks down together and builds them anew, then 'toggled' brings the icons back.
+            this._restoreAll();
+            this._host = null;
         });
 
-        container.add_child(this._trayBox);
-        this._sync();
+        container.add_child(box);
     }
 
     _detachFromDock() {
-        if (!this._trayBox)
-            return;
         this._restoreAll();
-        const box = this._trayBox;
-        this._trayBox = null;
-        this._dash?.disconnectObject(this);
-        this._dash = null;
-        box.destroy();
+        const slots = this._slots ?? [];
+        this._slots = [];
+        this._host = null;
+        for (const {dash, box} of slots) {
+            dash.disconnectObject(this);
+            box.destroy();
+        }
+    }
+
+    get _trayBox() {
+        return this._host?.box ?? null;
+    }
+
+    get _dash() {
+        return this._host?.dash ?? null;
+    }
+
+    _menuOpen() {
+        return [...this._menuIds.keys()].some(i => i.menu?.isOpen && this._inDock(i));
+    }
+
+    _queueMove() {
+        if (this._moveLaterId)
+            return;
+        this._moveLaterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._moveLaterId = 0;
+            const hovered = this._slots?.find(s => s.box.hover);
+            if (hovered)
+                this._moveTo(hovered);
+            return false;
+        });
+    }
+
+    _moveTo(slot) {
+        // A menu stays with its icon: don't pull the icons from under an open one.
+        if (!this._host || slot === this._host || !this._slots.includes(slot) || this._menuOpen())
+            return;
+        this._transfer(this._host, slot);
+    }
+
+    _transfer(from, to) {
+        to.box.destroy_all_children();
+        for (const container of from.box.get_children()) {
+            from.box.remove_child(container);
+            to.box.add_child(container);
+        }
+        this._host = to;
+        for (const container of to.box.get_children()) {
+            if (container.child)
+                this._fitButton(container.child);
+        }
+        this._syncClones();
+    }
+
+    // Each dock but the host shows a copy of each real icon, in the same order: a button styled and sized as the
+    // real one, around a clone of its icon. (A clone of the whole button paints its icon wrong: the effects
+    // AppIndicator puts on the icon.)
+    _syncClones() {
+        const containers = this._trayBox?.get_children() ?? [];
+        const horizontal = this._dash?._isHorizontal ?? true;
+        for (const slot of this._slots) {
+            if (slot === this._host)
+                continue;
+            slot.box.destroy_all_children();
+            for (const container of containers) {
+                const button = container.child;
+                if (button)
+                    slot.box.add_child(this._makeCopy(container, button, horizontal));
+            }
+        }
+    }
+
+    _makeCopy(container, button, horizontal) {
+        const {FILL, CENTER} = Clutter.ActorAlign;
+        const icons = new St.BoxLayout({
+            style_class: button._box?.style_class ?? 'panel-status-indicators-box',
+            x_align: CENTER,
+            y_align: CENTER,
+        });
+        const copy = new St.Bin({
+            style_class: button.style_class,
+            style: button.get_style(),
+            child: icons,
+            x_align: horizontal ? CENTER : FILL,
+            y_align: horizontal ? FILL : CENTER,
+            x_expand: !horizontal,
+            y_expand: horizontal,
+        });
+
+        const icon = button.icon ?? button._icon;
+        if (icon) {
+            icons.add_child(new Clutter.Clone({source: icon}));
+            // AppIndicator replaces an icon actor now and then: copy the new one.
+            icon.connectObject('destroy', () => {
+                this._clonesDirty = true;
+                this._queueSync();
+            }, copy);
+        }
+
+        // A hidden icon leaves no gap in the other trays either.
+        const update = () => {
+            copy.visible = container.visible && button.visible;
+        };
+        container.connectObject('notify::visible', update, copy);
+        button.connectObject('notify::visible', update, copy);
+        button.bind_property('opacity', copy, 'opacity', GObject.BindingFlags.SYNC_CREATE);
+        update();
+
+        // The real button pads itself from the panel theme (-natural-hpadding): take its length along the dock.
+        const length = horizontal ? 'width' : 'height';
+        const syncLength = () => {
+            if (container[length] > 0)
+                copy[`natural_${length}`] = container[length];
+        };
+        container.connectObject(`notify::${length}`, syncLength, copy);
+        syncLength();
+        return copy;
     }
 
     // --- Moving icons ------------------------------------------------------
@@ -164,6 +308,7 @@ export default class DockTrayExtension extends Extension {
         if (!this._trayBox)
             return;
 
+        let changed = false;
         for (const [role, indicator] of Object.entries(Main.panel.statusArea)) {
             if (!indicator || !isTrayRole(role))
                 continue;
@@ -174,6 +319,17 @@ export default class DockTrayExtension extends Extension {
                 continue;
 
             if (parent) {
+                // Panel boxes can go before the icons return (other extensions rebuild the top bar).
+                if (!this._watchedParents.has(parent)) {
+                    this._watchedParents.add(parent);
+                    parent.connectObject('destroy', () => {
+                        this._watchedParents?.delete(parent);
+                        for (const origin of this._origins?.values() ?? []) {
+                            if (origin.parent === parent)
+                                origin.parent = null;
+                        }
+                    }, this);
+                }
                 this._origins.set(container, {
                     parent,
                     index: parent.get_children().indexOf(container),
@@ -184,8 +340,16 @@ export default class DockTrayExtension extends Extension {
             this._fitButton(indicator);
             this._trackMenu(indicator);
 
-            container.connectObject('destroy', () => this._origins?.delete(container), this);
+            container.connectObject('destroy', () => {
+                this._origins?.delete(container);
+                this._clonesDirty = true;
+                this._queueSync();
+            }, this);
+            changed = true;
         }
+        if (changed || this._clonesDirty)
+            this._syncClones();
+        this._clonesDirty = false;
     }
 
     // A button takes the pointer over a whole slot of the dock, as an app icon does: across the dock's thickness and
@@ -229,6 +393,7 @@ export default class DockTrayExtension extends Extension {
             if (container.child)
                 this._sizeButton(container.child);
         }
+        this._syncClones();
     }
 
     _unfitButton(button) {
@@ -306,7 +471,8 @@ export default class DockTrayExtension extends Extension {
         if (this._menuAnnounced || !this._dash)
             return;
         this._menuAnnounced = true;
-        this._dash.emit('menu-opened');
+        this._announcedDash = this._dash;
+        this._announcedDash.emit('menu-opened');
     }
 
     // Lets the dock hide again once no tray menu is open. Waits a moment: moving onto another tray icon while a menu
@@ -316,9 +482,11 @@ export default class DockTrayExtension extends Extension {
             return;
         this._closeIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._closeIdleId = 0;
-            const stillOpen = [...this._menuIds.keys()].some(i => i.menu?.isOpen && this._inDock(i));
-            if (!stillOpen)
+            if (!this._menuOpen()) {
                 this._endMenu();
+                // The pointer may have gone to another dock's tray while the menu held it.
+                this._queueMove();
+            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -331,7 +499,8 @@ export default class DockTrayExtension extends Extension {
         if (!this._menuAnnounced)
             return;
         this._menuAnnounced = false;
-        this._dash?.emit('menu-closed');
+        this._announcedDash?.emit('menu-closed');
+        this._announcedDash = null;
     }
 
     _restoreAll() {
@@ -355,6 +524,8 @@ export default class DockTrayExtension extends Extension {
             }
         }
         this._origins.clear();
+        this._watchedParents.forEach(parent => parent.disconnectObject(this));
+        this._watchedParents.clear();
         this._endMenu();
     }
 }
