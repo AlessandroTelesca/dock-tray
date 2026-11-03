@@ -11,16 +11,21 @@
   padding-top: 6px;
   border-top: 1px solid rgba(255, 255, 255, 0.2);
 }
+/* The button spans the dock's thickness, so the whole slot takes the pointer; the highlight stays around the icon. */
 .dock-tray .panel-button {
   color: #ffffff;
+  padding: 0;
+  background: none;
+}
+.dock-tray .panel-button .panel-status-indicators-box {
   padding: 6px;
   border-radius: 99px;
   transition-duration: 100ms;
 }
-.dock-tray .panel-button:hover {
+.dock-tray .panel-button:hover .panel-status-indicators-box {
   background-color: rgba(255, 255, 255, 0.12);
 }
-.dock-tray .panel-button:active,
-.dock-tray .panel-button:checked {
+.dock-tray .panel-button:active .panel-status-indicators-box,
+.dock-tray .panel-button:checked .panel-status-indicators-box {
   background-color: rgba(255, 255, 255, 0.22);
 }
