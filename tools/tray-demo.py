@@ -1,4 +1,6 @@
 #!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: 2026 AlessandroTelesca
 # Three fake tray apps for testing dock-tray@alessandrot.
 import gi
 gi.require_version('Gtk', '3.0')

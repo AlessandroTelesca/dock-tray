@@ -20,3 +20,5 @@ then log out and in, and `gnome-extensions enable dock-tray@alessandrot`.
 `tools/tray-demo.py` shows three test tray icons with menus (needs `libayatana-appindicator-gtk3`).
 
 GNOME Shell 50.
+
+License: GPL-2.0-or-later, see `LICENSE`.
