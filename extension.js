@@ -282,9 +282,12 @@ export default class DockTrayExtension extends Extension {
 
         // The real button pads itself from the panel theme (-natural-hpadding): take its length along the dock.
         const length = horizontal ? 'width' : 'height';
+        // Never less than the dock-size minimum the copy has from the button's style: a box layout aborts the shell
+        // on a child whose natural size is under its minimum, and the container has no length before it is laid out.
         const syncLength = () => {
-            if (container[length] > 0)
-                copy[`natural_${length}`] = container[length];
+            const natural = Math.max(container[length], this._dash?.iconSize ?? 0);
+            if (natural > 0)
+                copy[`natural_${length}`] = natural;
         };
         container.connectObject(`notify::${length}`, syncLength, copy);
         syncLength();
