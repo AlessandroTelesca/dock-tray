@@ -18,7 +18,7 @@ gext-reload dock-tray@alessandrot
 
 - About the script:
   - `gext-reload` is the user's own script, at `~/.local/bin/gext-reload`. Its source is in `~/GIT/gext-reload`.
-  - It copies the *installed* extension to `$XDG_RUNTIME_DIR/gext-reload/<timestamp>/<uuid>`. The shell caches code by
+  - It copies the *installed* extension to `$XDG_RUNTIME_DIR/gext-reload/<timestamp>/gnome-shell/extensions/<uuid>`. The shell caches code by
     path, so a new path loads fresh code.
   - In the copy it renames every `GObject.registerClass` class and `GTypeName`, so they don't clash with the
     registered ones.
