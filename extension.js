@@ -23,6 +23,13 @@ const withoutDockSize = style => {
     return kept.length ? `${kept.join('; ')};` : '';
 };
 
+// A button's inline style as it is in the dock: without the padding along the top bar that AppIndicator's compact mode
+// sets there. In the dock the room around an icon comes from the stylesheet, and the icons sit close together.
+const dockStyle = style => {
+    const kept = (style ?? '').split(';').map(d => d.trim()).filter(d => d && !/^-(natural|minimum)-hpadding\s*:/.test(d));
+    return kept.length ? `${kept.join('; ')};` : null;
+};
+
 export default class DockTrayExtension extends Extension {
     enable() {
         this._generation = (this._generation ?? 0) + 1;
@@ -253,7 +260,7 @@ export default class DockTrayExtension extends Extension {
         });
         const copy = new St.Bin({
             style_class: button.style_class,
-            style: button.get_style(),
+            style: dockStyle(withoutDockSize(button.get_style())),
             child: icons,
             x_align: horizontal ? CENTER : FILL,
             y_align: horizontal ? FILL : CENTER,
@@ -282,10 +289,9 @@ export default class DockTrayExtension extends Extension {
 
         // The real button pads itself from the panel theme (-natural-hpadding): take its length along the dock.
         const length = horizontal ? 'width' : 'height';
-        // Never less than the dock-size minimum the copy has from the button's style: a box layout aborts the shell
-        // on a child whose natural size is under its minimum, and the container has no length before it is laid out.
+        // The container has no length before it is laid out.
         const syncLength = () => {
-            const natural = Math.max(container[length], this._dash?.iconSize ?? 0);
+            const natural = container[length];
             if (natural > 0)
                 copy[`natural_${length}`] = natural;
         };
@@ -355,8 +361,8 @@ export default class DockTrayExtension extends Extension {
         this._clonesDirty = false;
     }
 
-    // A button takes the pointer over a whole slot of the dock, as an app icon does: across the dock's thickness and
-    // at least the dock's icon size along it. Its icon and highlight stay their size, centred in it.
+    // A button takes the pointer across the dock's thickness, as an app icon does. Along the dock it is as long as its
+    // icon and highlight need, so the icons sit close together.
     _fitButton(button) {
         if (!this._layouts.has(button)) {
             const box = button._box ?? null;
@@ -382,13 +388,11 @@ export default class DockTrayExtension extends Extension {
 
     _sizeButton(button) {
         const layout = this._layouts.get(button);
-        const size = this._dash?.iconSize;
-        if (!layout || !size)
+        if (!layout)
             return;
-        const horizontal = this._dash._isHorizontal ?? true;
-        // Its own inline style: other extensions set some on panel buttons.
-        const own = layout.style ? `${layout.style} ` : '';
-        button.set_style(`${own}${horizontal ? 'min-width' : 'min-height'}: ${size}px;`);
+        // Its own inline style, without the minimum size earlier versions set: other extensions set some on panel
+        // buttons, and may have carried that along.
+        button.set_style(dockStyle(layout.style));
     }
 
     _sizeButtons() {
